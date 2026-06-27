@@ -161,10 +161,48 @@ function renderAdminDashboard() {
     <section class="admin-grid" aria-label="전체 학생 정보">
       ${STUDENTS.map(renderStudentCard).join("")}
     </section>
+
+    <section class="ai-counseling-panel">
+      <div class="panel-header">
+        <h3>✨ AI 학생 상담 전략 도우미</h3>
+        <p>특정 학생을 선택하고 고민을 입력하면, AI가 상담 전략을 제안합니다.</p>
+      </div>
+      <div class="panel-body">
+        <div class="selected-student-info">
+          <p id="aiSelectedStudent">선택된 학생이 없습니다.</p>
+        </div>
+        
+        <div class="counseling-input-group">
+          <label for="teacherConcern">상담 고민 입력</label>
+          <textarea id="teacherConcern" placeholder="예: 수업 참여는 좋은데 평가 결과가 낮습니다. 어떻게 상담하면 좋을까요?" rows="3" disabled></textarea>
+        </div>
+
+        <div class="preview-group hidden" id="previewGroup">
+          <label>전송 데이터 미리보기 (이름/학번 등은 제외됨)</label>
+          <pre id="previewData"></pre>
+        </div>
+
+        <div class="panel-actions">
+          <button id="requestAiButton" class="primary-button" disabled>AI 상담 전략 받기</button>
+        </div>
+
+        <div class="ai-result-group hidden" id="aiResultGroup">
+          <label>AI 제안 상담 전략</label>
+          <div id="aiResultContent" class="ai-result-content"></div>
+        </div>
+
+        <p id="aiErrorMessage" class="form-message" role="alert" aria-live="polite"></p>
+        <p class="ai-notice">
+          AI 상담 전략은 참고용입니다. 최종 판단과 실제 상담은 교사가 학생의 상황을 종합적으로 고려하여 진행해야 합니다.
+        </p>
+      </div>
+    </section>
   `;
 
   showOnly(adminView);
   logoutButton.classList.remove("hidden");
+  
+  initAiCounselingEvents();
 }
 
 function renderStudentCard(student) {
@@ -176,6 +214,7 @@ function renderStudentCard(student) {
         <p class="student-number">학번 ${student.id}</p>
         ${renderGrades(student.grades, true, `gradesTitle-${student.id}`)}
         ${renderTraits(student)}
+        <button class="ghost-button select-student-btn" data-id="${student.id}" style="width: 100%; margin-top: 12px;">상담 전략 요청</button>
       </div>
     </article>
   `;
@@ -210,6 +249,127 @@ function renderTraits(student) {
       </ul>
     </section>
   `;
+}
+
+/* 
+보안 점검 사항:
+1. 프론트엔드에 API 키를 넣으면 개발자 도구에서 노출될 수 있다.
+2. Gemini API 호출은 Vercel Serverless Function(/api/gemini-counseling)에서 처리한다.
+3. .env 파일은 GitHub에 올리지 않는다.
+4. Vercel 배포 시에는 Project Settings의 Environment Variables에 GEMINI_API_KEY를 등록해야 한다.
+5. Gemini로 전송하는 데이터는 이름, 학번, 사진 경로를 제외한 최소 정보로 제한한다.
+*/
+
+let selectedStudentForAi = null;
+
+function initAiCounselingEvents() {
+  const selectBtns = document.querySelectorAll('.select-student-btn');
+  const aiSelectedStudent = document.getElementById('aiSelectedStudent');
+  const teacherConcern = document.getElementById('teacherConcern');
+  const requestAiButton = document.getElementById('requestAiButton');
+  const previewGroup = document.getElementById('previewGroup');
+  const previewData = document.getElementById('previewData');
+  const aiResultGroup = document.getElementById('aiResultGroup');
+  const aiResultContent = document.getElementById('aiResultContent');
+  const aiErrorMessage = document.getElementById('aiErrorMessage');
+
+  selectBtns.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const studentId = e.target.getAttribute('data-id');
+      const student = STUDENTS.find(s => s.id === studentId);
+      if (student) {
+        selectedStudentForAi = student;
+        const alias = `학생 ${String.fromCharCode(65 + STUDENTS.indexOf(student))}`;
+        
+        aiSelectedStudent.innerHTML = `<strong>${student.name} (${student.id})</strong> 학생이 선택되었습니다. (화면용 정보)<br><span style="color:var(--muted); font-size:13px;">Gemini 전송용 익명화 정보: ${alias}</span>`;
+        teacherConcern.disabled = false;
+        requestAiButton.disabled = false;
+        updatePreview();
+        
+        document.querySelector('.ai-counseling-panel').scrollIntoView({ behavior: 'smooth' });
+      }
+    });
+  });
+
+  teacherConcern.addEventListener('input', updatePreview);
+
+  function updatePreview() {
+    if (!selectedStudentForAi) return;
+    const concernText = teacherConcern.value.trim();
+    
+    const gradesValues = Object.entries(selectedStudentForAi.grades).map(([k, v]) => `${k}: ${v}`).join(', ');
+    const traitValues = selectedStudentForAi.traits.join(' ');
+    const alias = `학생 ${String.fromCharCode(65 + STUDENTS.indexOf(selectedStudentForAi))}`;
+    
+    const payload = {
+      studentAlias: alias,
+      gradeSummary: gradesValues,
+      learningTraits: `${traitValues} ${selectedStudentForAi.teacherMemo}`,
+      teacherConcern: concernText || ""
+    };
+
+    previewData.textContent = JSON.stringify(payload, null, 2);
+    if (concernText) {
+      previewGroup.classList.remove('hidden');
+    } else {
+      previewGroup.classList.add('hidden');
+    }
+  }
+
+  requestAiButton.addEventListener('click', async () => {
+    if (!selectedStudentForAi) return;
+    const concernText = teacherConcern.value.trim();
+    
+    if (!concernText) {
+      aiErrorMessage.textContent = "상담 고민을 먼저 입력해주세요.";
+      return;
+    }
+
+    aiErrorMessage.textContent = "";
+    aiResultGroup.classList.add('hidden');
+    requestAiButton.disabled = true;
+    requestAiButton.textContent = "AI가 상담 전략을 생성하는 중입니다...";
+    
+    const gradesValues = Object.entries(selectedStudentForAi.grades).map(([k, v]) => `${k}: ${v}`).join(', ');
+    const traitValues = selectedStudentForAi.traits.join(' ');
+    const alias = `학생 ${String.fromCharCode(65 + STUDENTS.indexOf(selectedStudentForAi))}`;
+
+    const payload = {
+      studentAlias: alias,
+      gradeSummary: gradesValues,
+      learningTraits: `${traitValues} ${selectedStudentForAi.teacherMemo}`,
+      teacherConcern: concernText
+    };
+
+    try {
+      const response = await fetch('/api/gemini-counseling', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        const formattedResult = data.result
+          .replace(/\n/g, '<br>')
+          .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.*?)\*/g, '<em>$1</em>');
+          
+        aiResultContent.innerHTML = formattedResult;
+        aiResultGroup.classList.remove('hidden');
+      } else {
+        aiErrorMessage.textContent = "AI 상담 전략을 불러오지 못했습니다. API 키 또는 Vercel 환경 변수를 확인해주세요.";
+      }
+    } catch (error) {
+      aiErrorMessage.textContent = "AI 상담 전략을 불러오지 못했습니다. 네트워크 오류가 발생했습니다.";
+    } finally {
+      requestAiButton.disabled = false;
+      requestAiButton.textContent = "AI 상담 전략 받기";
+    }
+  });
 }
 
 showOnly(loginView);
